@@ -288,6 +288,9 @@ impl PyStr {
             len
         })
     }
+    pub fn char_len(&self) -> usize {
+        self.len()
+    }
 
     #[pymethod(name = "__sizeof__")]
     fn sizeof(&self) -> usize {
@@ -1454,5 +1457,13 @@ impl<'s> AnyStr<'s, char> for str {
             splited.push(convert(&self[..last_offset]));
         }
         splited
+    }
+}
+
+impl TryFromObject for String {
+    fn try_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
+        Ok(PyStrRef::try_from_object(vm, obj)?
+            .borrow_value()
+            .to_owned())
     }
 }
