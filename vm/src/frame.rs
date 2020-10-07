@@ -316,6 +316,7 @@ impl ExecutingFrame<'_> {
     }
 
     /// Execute a single instruction.
+    #[inline(always)]
     fn execute_instruction(&mut self, vm: &VirtualMachine) -> FrameResult {
         vm.check_signals()?;
 
@@ -336,160 +337,179 @@ impl ExecutingFrame<'_> {
             trace!("=======");
         }
 
-        match instruction {
+        macro_rules! fn_dispatch {
+            (args($dT:ty => $retT:ty ,$arg1:ident: $argT1:ty, $arg2:ident: $argT2:ty), match ($d:expr) { $($p:pat => $body:block)* }) => {{
+                let f = match $d {
+                    $($p => {
+                        fn match_arm(x: $dT, $arg1: $argT1, $arg2: $argT2) -> $retT {
+                            match x {
+                                $p => $body
+                                _ => unsafe { std::hint::unreachable_unchecked() }
+                            }
+                        }
+                        match_arm as fn($dT, $argT1, $argT2) -> $retT
+                    })*
+                };
+                f($d, $arg1, $arg2)
+            }}
+        }
+
+        let zelf = self;
+        fn_dispatch!(args(&bytecode::Instruction => FrameResult, zelf: &mut ExecutingFrame, vm: &VirtualMachine),
+        match (instruction) {
             bytecode::Instruction::LoadConst { ref value } => {
                 let obj = vm.ctx.unwrap_constant(value);
-                self.push_value(obj);
+                zelf.push_value(obj);
                 Ok(None)
             }
             bytecode::Instruction::Import {
                 ref name,
                 ref symbols,
                 ref level,
-            } => self.import(vm, name, symbols, *level),
-            bytecode::Instruction::ImportStar => self.import_star(vm),
-            bytecode::Instruction::ImportFrom { ref name } => self.import_from(vm, name),
-            bytecode::Instruction::LoadName { ref name, scope } => self.load_name(vm, name, *scope),
+            } => { zelf.import(vm, name, symbols, *level) }
+            bytecode::Instruction::ImportStar => { zelf.import_star(vm) }
+            bytecode::Instruction::ImportFrom { ref name } => { zelf.import_from(vm, name) }
+            bytecode::Instruction::LoadName { ref name, scope } => { zelf.load_name(vm, name, *scope) }
             bytecode::Instruction::StoreName { ref name, scope } => {
-                self.store_name(vm, name, *scope)
+                zelf.store_name(vm, name, *scope)
             }
-            bytecode::Instruction::DeleteName { ref name } => self.delete_name(vm, name),
-            bytecode::Instruction::Subscript => self.execute_subscript(vm),
-            bytecode::Instruction::StoreSubscript => self.execute_store_subscript(vm),
-            bytecode::Instruction::DeleteSubscript => self.execute_delete_subscript(vm),
+            bytecode::Instruction::DeleteName { ref name } => { zelf.delete_name(vm, name) }
+            bytecode::Instruction::Subscript => { zelf.execute_subscript(vm) }
+            bytecode::Instruction::StoreSubscript => { zelf.execute_store_subscript(vm) }
+            bytecode::Instruction::DeleteSubscript => { zelf.execute_delete_subscript(vm) }
             bytecode::Instruction::Pop => {
                 // Pop value from stack and ignore.
-                self.pop_value();
+                zelf.pop_value();
                 Ok(None)
             }
             bytecode::Instruction::Duplicate => {
                 // Duplicate top of stack
-                let value = self.pop_value();
-                self.push_value(value.clone());
-                self.push_value(value);
+                let value = zelf.pop_value();
+                zelf.push_value(value.clone());
+                zelf.push_value(value);
                 Ok(None)
             }
-            bytecode::Instruction::Rotate { amount } => self.execute_rotate(*amount),
+            bytecode::Instruction::Rotate { amount } => { zelf.execute_rotate(*amount) }
             bytecode::Instruction::BuildString { size } => {
-                let s = self
+                let s = zelf
                     .pop_multiple(*size)
                     .into_iter()
                     .map(|pyobj| objstr::clone_value(&pyobj))
                     .collect::<String>();
                 let str_obj = vm.ctx.new_str(s);
-                self.push_value(str_obj);
+                zelf.push_value(str_obj);
                 Ok(None)
             }
             bytecode::Instruction::BuildList { size, unpack } => {
-                let elements = self.get_elements(vm, *size, *unpack)?;
+                let elements = zelf.get_elements(vm, *size, *unpack)?;
                 let list_obj = vm.ctx.new_list(elements);
-                self.push_value(list_obj);
+                zelf.push_value(list_obj);
                 Ok(None)
             }
             bytecode::Instruction::BuildSet { size, unpack } => {
-                let elements = self.get_elements(vm, *size, *unpack)?;
+                let elements = zelf.get_elements(vm, *size, *unpack)?;
                 let set = vm.ctx.new_set();
                 for item in elements {
                     set.add(item, vm)?;
                 }
-                self.push_value(set.into_object());
+                zelf.push_value(set.into_object());
                 Ok(None)
             }
             bytecode::Instruction::BuildTuple { size, unpack } => {
-                let elements = self.get_elements(vm, *size, *unpack)?;
+                let elements = zelf.get_elements(vm, *size, *unpack)?;
                 let list_obj = vm.ctx.new_tuple(elements);
-                self.push_value(list_obj);
+                zelf.push_value(list_obj);
                 Ok(None)
             }
             bytecode::Instruction::BuildMap {
                 size,
                 unpack,
                 for_call,
-            } => self.execute_build_map(vm, *size, *unpack, *for_call),
-            bytecode::Instruction::BuildSlice { size } => self.execute_build_slice(vm, *size),
+            } => { zelf.execute_build_map(vm, *size, *unpack, *for_call) }
+            bytecode::Instruction::BuildSlice { size } => { zelf.execute_build_slice(vm, *size) }
             bytecode::Instruction::ListAppend { i } => {
-                let list_obj = self.nth_value(*i);
-                let item = self.pop_value();
+                let list_obj = zelf.nth_value(*i);
+                let item = zelf.pop_value();
                 objlist::PyListRef::try_from_object(vm, list_obj)?.append(item);
                 Ok(None)
             }
             bytecode::Instruction::SetAdd { i } => {
-                let set_obj = self.nth_value(*i);
-                let item = self.pop_value();
+                let set_obj = zelf.nth_value(*i);
+                let item = zelf.pop_value();
                 objset::PySetRef::try_from_object(vm, set_obj)?.add(item, vm)?;
                 Ok(None)
             }
             bytecode::Instruction::MapAdd { i } => {
-                let dict_obj = self.nth_value(*i + 1);
-                let key = self.pop_value();
-                let value = self.pop_value();
+                let dict_obj = zelf.nth_value(*i + 1);
+                let key = zelf.pop_value();
+                let value = zelf.pop_value();
                 PyDictRef::try_from_object(vm, dict_obj)?.set_item(key, value, vm)?;
                 Ok(None)
             }
             bytecode::Instruction::MapAddRev { i } => {
                 // change order of evalutio of key and value to support Py3.8 Named expressions in dict comprehension
-                let dict_obj = self.nth_value(*i + 1);
-                let value = self.pop_value();
-                let key = self.pop_value();
+                let dict_obj = zelf.nth_value(*i + 1);
+                let value = zelf.pop_value();
+                let key = zelf.pop_value();
                 PyDictRef::try_from_object(vm, dict_obj)?.set_item(key, value, vm)?;
                 Ok(None)
             }
             bytecode::Instruction::BinaryOperation { ref op, inplace } => {
-                self.execute_binop(vm, op, *inplace)
+                zelf.execute_binop(vm, op, *inplace)
             }
-            bytecode::Instruction::LoadAttr { ref name } => self.load_attr(vm, name),
-            bytecode::Instruction::StoreAttr { ref name } => self.store_attr(vm, name),
-            bytecode::Instruction::DeleteAttr { ref name } => self.delete_attr(vm, name),
-            bytecode::Instruction::UnaryOperation { ref op } => self.execute_unop(vm, op),
-            bytecode::Instruction::CompareOperation { ref op } => self.execute_compare(vm, op),
+            bytecode::Instruction::LoadAttr { ref name } => { zelf.load_attr(vm, name) }
+            bytecode::Instruction::StoreAttr { ref name } => { zelf.store_attr(vm, name) }
+            bytecode::Instruction::DeleteAttr { ref name } => { zelf.delete_attr(vm, name) }
+            bytecode::Instruction::UnaryOperation { ref op } => { zelf.execute_unop(vm, op) }
+            bytecode::Instruction::CompareOperation { ref op } => { zelf.execute_compare(vm, op) }
             bytecode::Instruction::ReturnValue => {
-                let value = self.pop_value();
-                self.unwind_blocks(vm, UnwindReason::Returning { value })
+                let value = zelf.pop_value();
+                zelf.unwind_blocks(vm, UnwindReason::Returning { value })
             }
             bytecode::Instruction::YieldValue => {
-                let value = self.pop_value();
-                let value = if self.code.flags.contains(bytecode::CodeFlags::IS_COROUTINE) {
+                let value = zelf.pop_value();
+                let value = if zelf.code.flags.contains(bytecode::CodeFlags::IS_COROUTINE) {
                     PyAsyncGenWrappedValue(value).into_object(vm)
                 } else {
                     value
                 };
                 Ok(Some(ExecutionResult::Yield(value)))
             }
-            bytecode::Instruction::YieldFrom => self.execute_yield_from(vm),
+            bytecode::Instruction::YieldFrom => { zelf.execute_yield_from(vm) }
             bytecode::Instruction::SetupAnnotation => {
-                let locals = self.scope.get_locals();
+                let locals = zelf.scope.get_locals();
                 if !locals.contains_key("__annotations__", vm) {
                     locals.set_item("__annotations__", vm.ctx.new_dict().into_object(), vm)?;
                 }
                 Ok(None)
             }
             bytecode::Instruction::SetupLoop { start, end } => {
-                self.push_block(BlockType::Loop {
+                zelf.push_block(BlockType::Loop {
                     start: *start,
                     end: *end,
                 });
                 Ok(None)
             }
             bytecode::Instruction::SetupExcept { handler } => {
-                self.push_block(BlockType::TryExcept { handler: *handler });
+                zelf.push_block(BlockType::TryExcept { handler: *handler });
                 Ok(None)
             }
             bytecode::Instruction::SetupFinally { handler } => {
-                self.push_block(BlockType::Finally { handler: *handler });
+                zelf.push_block(BlockType::Finally { handler: *handler });
                 Ok(None)
             }
             bytecode::Instruction::EnterFinally => {
-                self.push_block(BlockType::FinallyHandler { reason: None });
+                zelf.push_block(BlockType::FinallyHandler { reason: None });
                 Ok(None)
             }
             bytecode::Instruction::EndFinally => {
                 // Pop the finally handler from the stack, and recall
                 // what was the reason we were in this finally clause.
-                let block = self.pop_block();
+                let block = zelf.pop_block();
 
                 if let BlockType::FinallyHandler { reason } = block.typ {
                     if let Some(reason) = reason {
-                        self.unwind_blocks(vm, reason)
+                        zelf.unwind_blocks(vm, reason)
                     } else {
                         Ok(None)
                     }
@@ -500,30 +520,30 @@ impl ExecutingFrame<'_> {
                 }
             }
             bytecode::Instruction::SetupWith { end } => {
-                let context_manager = self.pop_value();
+                let context_manager = zelf.pop_value();
                 let exit = vm.get_attribute(context_manager.clone(), "__exit__")?;
-                self.push_value(exit);
+                zelf.push_value(exit);
                 // Call enter:
                 let enter_res = vm.call_method(&context_manager, "__enter__", vec![])?;
-                self.push_block(BlockType::Finally { handler: *end });
-                self.push_value(enter_res);
+                zelf.push_block(BlockType::Finally { handler: *end });
+                zelf.push_value(enter_res);
                 Ok(None)
             }
             bytecode::Instruction::BeforeAsyncWith => {
-                let mgr = self.pop_value();
+                let mgr = zelf.pop_value();
                 let aexit = vm.get_attribute(mgr.clone(), "__aexit__")?;
-                self.push_value(aexit);
+                zelf.push_value(aexit);
                 let aenter_res = vm.call_method(&mgr, "__aenter__", vec![])?;
-                self.push_value(aenter_res);
+                zelf.push_value(aenter_res);
 
                 Ok(None)
             }
             bytecode::Instruction::SetupAsyncWith { end } => {
-                self.push_block(BlockType::Finally { handler: *end });
+                zelf.push_block(BlockType::Finally { handler: *end });
                 Ok(None)
             }
             bytecode::Instruction::WithCleanupStart => {
-                let block = self.current_block().unwrap();
+                let block = zelf.current_block().unwrap();
                 let reason = match block.typ {
                     BlockType::FinallyHandler { reason } => reason,
                     _ => panic!("WithCleanupStart expects a FinallyHandler block on stack"),
@@ -533,7 +553,7 @@ impl ExecutingFrame<'_> {
                     _ => None,
                 });
 
-                let exit = self.pop_value();
+                let exit = zelf.pop_value();
 
                 let args = if let Some(exc) = exc {
                     exceptions::split(exc, vm)
@@ -541,39 +561,39 @@ impl ExecutingFrame<'_> {
                     (vm.ctx.none(), vm.ctx.none(), vm.ctx.none())
                 };
                 let exit_res = vm.invoke(&exit, vec![args.0, args.1, args.2])?;
-                self.push_value(exit_res);
+                zelf.push_value(exit_res);
 
                 Ok(None)
             }
             bytecode::Instruction::WithCleanupFinish => {
-                let block = self.pop_block();
+                let block = zelf.pop_block();
                 let reason = match block.typ {
                     BlockType::FinallyHandler { reason } => reason,
                     _ => panic!("WithCleanupFinish expects a FinallyHandler block on stack"),
                 };
 
-                let suppress_exception = objbool::boolval(vm, self.pop_value())?;
+                let suppress_exception = objbool::boolval(vm, zelf.pop_value())?;
                 if suppress_exception {
                     // suppress exception
                     Ok(None)
                 } else if let Some(reason) = reason {
-                    self.unwind_blocks(vm, reason)
+                    zelf.unwind_blocks(vm, reason)
                 } else {
                     Ok(None)
                 }
             }
             bytecode::Instruction::PopBlock => {
-                self.pop_block();
+                zelf.pop_block();
                 Ok(None)
             }
             bytecode::Instruction::GetIter => {
-                let iterated_obj = self.pop_value();
+                let iterated_obj = zelf.pop_value();
                 let iter_obj = objiter::get_iter(vm, &iterated_obj)?;
-                self.push_value(iter_obj);
+                zelf.push_value(iter_obj);
                 Ok(None)
             }
             bytecode::Instruction::GetAwaitable => {
-                let awaited_obj = self.pop_value();
+                let awaited_obj = zelf.pop_value();
                 let awaitable = if awaited_obj.payload_is::<PyCoroutine>() {
                     awaited_obj
                 } else {
@@ -586,79 +606,79 @@ impl ExecutingFrame<'_> {
                         })?;
                     vm.invoke(&await_method, vec![])?
                 };
-                self.push_value(awaitable);
+                zelf.push_value(awaitable);
                 Ok(None)
             }
             bytecode::Instruction::GetAIter => {
-                let aiterable = self.pop_value();
+                let aiterable = zelf.pop_value();
                 let aiter = vm.call_method(&aiterable, "__aiter__", vec![])?;
-                self.push_value(aiter);
+                zelf.push_value(aiter);
                 Ok(None)
             }
             bytecode::Instruction::GetANext => {
-                let aiter = self.last_value();
+                let aiter = zelf.last_value();
                 let awaitable = vm.call_method(&aiter, "__anext__", vec![])?;
                 let awaitable = if awaitable.payload_is::<PyCoroutine>() {
                     awaitable
                 } else {
                     vm.call_method(&awaitable, "__await__", vec![])?
                 };
-                self.push_value(awaitable);
+                zelf.push_value(awaitable);
                 Ok(None)
             }
-            bytecode::Instruction::ForIter { target } => self.execute_for_iter(vm, *target),
-            bytecode::Instruction::MakeFunction => self.execute_make_function(vm),
-            bytecode::Instruction::CallFunction { typ } => self.execute_call_function(vm, typ),
+            bytecode::Instruction::ForIter { target } => { zelf.execute_for_iter(vm, *target) }
+            bytecode::Instruction::MakeFunction => { zelf.execute_make_function(vm) }
+            bytecode::Instruction::CallFunction { typ } => { zelf.execute_call_function(vm, typ) }
             bytecode::Instruction::Jump { target } => {
-                self.jump(*target);
+                zelf.jump(*target);
                 Ok(None)
             }
             bytecode::Instruction::JumpIfTrue { target } => {
-                let obj = self.pop_value();
+                let obj = zelf.pop_value();
                 let value = objbool::boolval(vm, obj)?;
                 if value {
-                    self.jump(*target);
+                    zelf.jump(*target);
                 }
                 Ok(None)
             }
 
             bytecode::Instruction::JumpIfFalse { target } => {
-                let obj = self.pop_value();
+                let obj = zelf.pop_value();
                 let value = objbool::boolval(vm, obj)?;
                 if !value {
-                    self.jump(*target);
+                    zelf.jump(*target);
                 }
                 Ok(None)
             }
 
             bytecode::Instruction::JumpIfTrueOrPop { target } => {
-                let obj = self.last_value();
+                let obj = zelf.last_value();
                 let value = objbool::boolval(vm, obj)?;
                 if value {
-                    self.jump(*target);
+                    zelf.jump(*target);
                 } else {
-                    self.pop_value();
+                    zelf.pop_value();
                 }
                 Ok(None)
             }
 
             bytecode::Instruction::JumpIfFalseOrPop { target } => {
-                let obj = self.last_value();
+                let obj = zelf.last_value();
                 let value = objbool::boolval(vm, obj)?;
                 if !value {
-                    self.jump(*target);
+                    zelf.jump(*target);
                 } else {
-                    self.pop_value();
+                    zelf.pop_value();
                 }
                 Ok(None)
             }
 
-            bytecode::Instruction::Raise { argc } => self.execute_raise(vm, *argc),
+            bytecode::Instruction::Raise { argc } => { zelf.execute_raise(vm, *argc) }
 
-            bytecode::Instruction::Break => self.unwind_blocks(vm, UnwindReason::Break),
-            bytecode::Instruction::Continue => self.unwind_blocks(vm, UnwindReason::Continue),
+            bytecode::Instruction::Break => { zelf.unwind_blocks(vm, UnwindReason::Break) }
+            bytecode::Instruction::Continue => { zelf.unwind_blocks(vm, UnwindReason::Continue) }
             bytecode::Instruction::PrintExpr => {
-                let expr = self.pop_value();
+                let expr = zelf.pop_value();
 
                 let displayhook = vm
                     .get_attribute(vm.sys_module.clone(), "displayhook")
@@ -668,11 +688,11 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             bytecode::Instruction::LoadBuildClass => {
-                self.push_value(vm.get_attribute(vm.builtins.clone(), "__build_class__")?);
+                zelf.push_value(vm.get_attribute(vm.builtins.clone(), "__build_class__")?);
                 Ok(None)
             }
             bytecode::Instruction::UnpackSequence { size } => {
-                let value = self.pop_value();
+                let value = zelf.pop_value();
                 let elements = vm.extract_elements(&value).map_err(|e| {
                     if e.lease_class().is(&vm.ctx.exceptions.type_error) {
                         vm.new_type_error(format!(
@@ -686,7 +706,7 @@ impl ExecutingFrame<'_> {
                 let msg = match elements.len().cmp(size) {
                     std::cmp::Ordering::Equal => {
                         for element in elements.into_iter().rev() {
-                            self.push_value(element);
+                            zelf.push_value(element);
                         }
                         None
                     }
@@ -706,24 +726,24 @@ impl ExecutingFrame<'_> {
                 }
             }
             bytecode::Instruction::UnpackEx { before, after } => {
-                self.execute_unpack_ex(vm, *before, *after)
+                zelf.execute_unpack_ex(vm, *before, *after)
             }
             bytecode::Instruction::FormatValue { conversion } => {
                 use bytecode::ConversionFlag::*;
                 let value = match conversion {
-                    Some(Str) => vm.to_str(&self.pop_value())?.into_object(),
-                    Some(Repr) => vm.to_repr(&self.pop_value())?.into_object(),
-                    Some(Ascii) => vm.to_ascii(&self.pop_value())?,
-                    None => self.pop_value(),
+                    Some(Str) => vm.to_str(&zelf.pop_value())?.into_object(),
+                    Some(Repr) => vm.to_repr(&zelf.pop_value())?.into_object(),
+                    Some(Ascii) => vm.to_ascii(&zelf.pop_value())?,
+                    None => zelf.pop_value(),
                 };
 
-                let spec = vm.to_str(&self.pop_value())?.into_object();
+                let spec = vm.to_str(&zelf.pop_value())?.into_object();
                 let formatted = vm.call_method(&value, "__format__", vec![spec])?;
-                self.push_value(formatted);
+                zelf.push_value(formatted);
                 Ok(None)
             }
             bytecode::Instruction::PopException {} => {
-                let block = self.pop_block();
+                let block = zelf.pop_block();
                 if let BlockType::ExceptHandler = block.typ {
                     vm.pop_exception().expect("Should have exception in stack");
                     Ok(None)
@@ -732,11 +752,11 @@ impl ExecutingFrame<'_> {
                 }
             }
             bytecode::Instruction::Reverse { amount } => {
-                let stack_len = self.state.stack.len();
-                self.state.stack[stack_len - amount..stack_len].reverse();
+                let stack_len = zelf.state.stack.len();
+                zelf.state.stack[stack_len - amount..stack_len].reverse();
                 Ok(None)
             }
-        }
+        })
     }
 
     #[cfg_attr(feature = "flame-it", flame("Frame"))]
